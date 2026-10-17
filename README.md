@@ -8,6 +8,14 @@ also be loaded as a module inside any quickshell config.
 
 Discord: https://discord.gg/eBAz5q7TpY
 
+<p align="center"><img src="docs/preview.gif" width="500" alt="Orbit opening over three wallpapers"></p>
+
+<p align="center">
+  <img src="docs/preview-neptune.png" width="32%" alt="neptune">
+  <img src="docs/preview-sun.png" width="32%" alt="sun">
+  <img src="docs/preview-moon.png" width="32%" alt="moon">
+</p>
+
 ## Install
 
 Requires [quickshell](https://quickshell.org) and a compositor with
