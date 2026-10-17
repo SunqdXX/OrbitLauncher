@@ -1,0 +1,7 @@
+module Orbit
+OrbitWindow 1.0 OrbitWindow.qml
+OrbitView 1.0 OrbitView.qml
+OrbitSphere 1.0 OrbitSphere.qml
+OrbitConfig 1.0 OrbitConfig.qml
+OrbitApps 1.0 OrbitApps.qml
+OrbitIcon 1.0 OrbitIcon.qml

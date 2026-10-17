@@ -1,0 +1,13 @@
+{
+  "name": "test",
+  "flavour": "red",
+  "mode": "dark",
+  "colours": {
+    "primary": "ffb4a8",
+    "primary_paletteKeyColor": "c0392b",
+    "surfaceContainer": "2a1c1a",
+    "onSurface": "f5ddd9",
+    "onSurfaceVariant": "d8c2be",
+    "outline": "a08c89"
+  }
+}
