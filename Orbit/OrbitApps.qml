@@ -1,8 +1,6 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
-import Quickshell
-import Quickshell.Io
 import "internal/fzf.js" as Fzf
 
 // Desktop entries, launch history, search and launching.
@@ -10,6 +8,7 @@ QtObject {
     id: root
 
     required property OrbitConfig config
+    readonly property var backend: config.backend
 
     // id -> launch count, persisted in <stateDir>/history.json
     property var frequency: ({})
@@ -24,7 +23,7 @@ QtObject {
                 }
             return h.replace(/\.desktop$/, "");
         });
-        return DesktopEntries.applications.values.filter(a => !a.noDisplay && !hidden.some(h => typeof h === "string" ? h === a.id : h.test(a.id)));
+        return (backend ? backend.apps : []).filter(a => !a.noDisplay && !hidden.some(h => typeof h === "string" ? h === a.id : h.test(a.id)));
     }
 
     // Favourites first, then most launched, then by name: the order the orbit fills in
@@ -105,7 +104,7 @@ QtObject {
     function launchPrefix(): list<string> {
         const lp = Array.from(config.launchPrefix);
         if (lp.length === 1 && lp[0] === "auto")
-            return Quickshell.env("UWSM_FINALIZE_VARNAMES") ? ["uwsm", "app", "--"] : [];
+            return backend.env("UWSM_FINALIZE_VARNAMES") ? ["uwsm", "app", "--"] : [];
         if (lp.length === 1 && lp[0] === "none")
             return [];
         return lp;
@@ -115,44 +114,45 @@ QtObject {
         const t = Array.from(config.terminal);
         if (t.length)
             return t;
-        const env = Quickshell.env("TERMINAL");
+        const env = backend.env("TERMINAL");
         return env ? env.split(" ").filter(s => s) : ["kitty"];
     }
 
-    function launch(entry: DesktopEntry): void {
-        if (!entry)
+    readonly property string historyPath: `${config.resolvedStateDir}/history.json`
+
+    function launch(entry: var): void {
+        if (!entry || !backend)
             return;
         const f = Object.assign({}, frequency);
         f[entry.id] = (f[entry.id] ?? 0) + 1;
         frequency = f;
-        history.setText(JSON.stringify(f));
+        backend.writeFile(historyPath, JSON.stringify(f));
 
         const cmd = entry.runInTerminal ? [...terminalCommand(), ...entry.command] : [...entry.command];
-        Quickshell.execDetached({
-            command: [...launchPrefix(), ...cmd],
-            workingDirectory: entry.workingDirectory || Quickshell.env("HOME")
-        });
+        backend.exec([...launchPrefix(), ...cmd], entry.workingDirectory || backend.env("HOME"));
     }
 
-    property FileView _history: FileView {
-        id: history
-
-        path: `${root.config.resolvedStateDir}/history.json`
-        printErrors: false
-        atomicWrites: true
-        onLoaded: {
-            try {
-                const j = JSON.parse(text());
-                if (j && typeof j === "object")
-                    root.frequency = j;
-            } catch (e) {
-                console.warn("orbit: history.json is corrupt, starting fresh");
-            }
+    function loadHistory(): void {
+        if (!backend)
+            return;
+        const text = backend.readFile(historyPath);
+        if (!text) {
+            // First run: create the directory so the first launch can be saved
+            backend.mkdirs(config.resolvedStateDir);
+            frequency = {};
+            return;
         }
-        onLoadFailed: err => {
-            // First run: make sure the directory exists so the first launch can be saved
-            if (err === FileViewError.FileNotFound)
-                Quickshell.execDetached(["mkdir", "-p", root.config.resolvedStateDir]);
+        try {
+            const j = JSON.parse(text);
+            frequency = j && typeof j === "object" ? j : {};
+        } catch (e) {
+            console.warn("orbit: history.json is corrupt, starting fresh");
+            frequency = {};
         }
     }
+
+    // Deferred: these can fire while `sorted` is being evaluated during creation
+    onHistoryPathChanged: Qt.callLater(loadHistory)
+    onBackendChanged: Qt.callLater(loadHistory)
+    Component.onCompleted: Qt.callLater(loadHistory)
 }

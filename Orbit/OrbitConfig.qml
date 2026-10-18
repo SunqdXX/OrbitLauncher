@@ -1,8 +1,6 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
-import Quickshell
-import Quickshell.Io
 import "internal/conf.js" as Conf
 import "internal/theme.js" as Theme
 
@@ -15,9 +13,13 @@ QtObject {
     id: root
 
     // ---- file loading ---------------------------------------------------
+    // Reads files and the environment: the native backend in the `orbit`
+    // binary, or QuickshellBackend inside a quickshell config. OrbitWindow
+    // fills this in when it is left empty.
+    property var backend: null
     property string source: ""          // path to orbit.conf ("" = QML values only)
     property bool watchFile: true       // hot-reload when the file changes
-    readonly property string home: Quickshell.env("HOME") ?? ""
+    readonly property string home: backend ? backend.env("HOME") : ""
     readonly property list<string> errors: _errors
     signal reloaded
 
@@ -97,8 +99,8 @@ QtObject {
     property real blurIgnoreAlpha: 0.87 // only pixels more opaque than this get blurred behind them
     property bool closeOnFocusLoss: true
     property real verticalOffset: 0
-    property string iconTheme: ""       // read by the `orbit` wrapper, not by QML
-    property string renderer: "gl"      // gl | software, read by the `orbit` wrapper
+    property string iconTheme: ""       // icon theme for app icons ("" = detect), standalone only
+    property string renderer: "gl"      // gl | software, standalone only, read at startup
 
     // ---- resolved values (read these, not the raw strings above) --------------
     readonly property var themeColours: _theme
@@ -113,8 +115,9 @@ QtObject {
     readonly property color cLabel: labelColour || cText
     readonly property color cKey: _theme.keyColour || cPrimary
 
-    readonly property string resolvedStateDir: expand(stateDir) || ((Quickshell.env("XDG_STATE_HOME") || `${home}/.local/state`) + "/orbit")
-    readonly property string resolvedPlanetsDir: expand(planetsDir) || Qt.resolvedUrl("planets").toString().replace(/^file:\/\//, "")
+    readonly property string resolvedStateDir: expand(stateDir) || (((backend ? backend.env("XDG_STATE_HOME") : "") || `${home}/.local/state`) + "/orbit")
+    // A URL, so the planets bundled inside the binary (qrc:) work like files on disk
+    readonly property string resolvedPlanetsUrl: planetsDir ? "file://" + expand(planetsDir) : Qt.resolvedUrl("planets").toString()
     readonly property string resolvedOrbitStyle: orbitStyle === "auto" ? (resolvedPlanet === "saturn" ? "rings" : "sphere") : orbitStyle
     readonly property string resolvedPlanet: {
         const p = planet.trim().toLowerCase();
@@ -166,7 +169,6 @@ QtObject {
     property list<string> _errors: []
     property var _defaults: null
     property var _fileKeys: []
-    property bool _fileReady: false
     property string _randomPlanet: "moon"
     property list<string> _knownPlanets: ["earth", "jupiter", "mars", "moon", "neptune", "saturn", "serpulo", "sun", "uranus"]
 
@@ -207,48 +209,68 @@ QtObject {
     }
 
     function reload(): void {
-        file.reload();
-        themeView.reload();
+        loadConfig();
+        loadTheme();
+    }
+
+    function loadConfig(): void {
+        if (!backend || _defaults === null)
+            return;
+        const path = expand(source);
+        if (!path) {
+            apply("");
+            return;
+        }
+        if (watchFile)
+            backend.watch(path);
+        const text = backend.readFile(path);
+        if (!text && !_warnedMissing) {
+            _warnedMissing = true;
+            console.warn(`orbit: cannot read config ${source}, using defaults`);
+        }
+        apply(text);
+    }
+
+    function loadTheme(): void {
+        const path = expand(themeFile);
+        if (!backend || !path) {
+            _theme = {};
+            return;
+        }
+        backend.watch(path);
+        const text = backend.readFile(path);
+        if (!text) {
+            _theme = {};
+            return;
+        }
+        const t = Theme.parse(text, themeMode);
+        if (t.error) {
+            console.warn(`orbit: ${themeFile}: ${t.error}`);
+            return;
+        }
+        _theme = t;
+    }
+
+    property bool _warnedMissing: false
+
+    onBackendChanged: reload()
+    onSourceChanged: loadConfig()
+    onThemeFileChanged: loadTheme()
+    onThemeModeChanged: loadTheme()
+
+    property Connections _watcher: Connections {
+        target: root.backend
+        ignoreUnknownSignals: true
+
+        function onFileChanged(path: string): void {
+            if (path === root.expand(root.source) && root.watchFile)
+                root.loadConfig();
+            else if (path === root.expand(root.themeFile))
+                root.loadTheme();
+        }
     }
 
     readonly property list<string> _configKeys: ["size", "minSize", "maxSize", "padding", "orbitRadius", "tileSize", "ringTileSize", "iconScale", "tileRadius", "searchWidth", "searchHeight", "searchPadding", "showLabels", "planet", "planetsDir", "orbitStyle", "planetSpin", "planetResolution", "vignette", "planetBackground", "idleSpeed", "restPitch", "dragSensitivity", "animations", "animSpeed", "maxFps", "searchOpacity", "placeholder", "fontFamily", "fontSize", "labelFontSize", "iconFontSize", "themeFile", "themeMode", "primary", "surfaceContainer", "textColour", "iconColour", "placeholderColour", "searchColour", "tileColour", "tileOpacity", "labelBackground", "labelOpacity", "labelColour", "maxApps", "favouriteApps", "hiddenApps", "specialPrefix", "launchPrefix", "terminal", "closeOnLaunch", "sortByFrequency", "stateDir", "monitor", "backdropOpacity", "backdropColour", "layer", "namespace", "blur", "blurIgnoreAlpha", "closeOnFocusLoss", "verticalOffset", "iconTheme", "renderer"]
-
-    property FileView _file: FileView {
-        id: file
-
-        path: root.expand(root.source)
-        watchChanges: root.watchFile
-        printErrors: false
-        onFileChanged: reload()
-        onLoaded: {
-            root._fileReady = true;
-            root.apply(text());
-        }
-        onLoadFailed: err => {
-            if (root.source)
-                console.warn(`orbit: cannot read config ${root.source} (${FileViewError.toString(err)}), using defaults`);
-            root.apply("");
-        }
-    }
-
-    property FileView _themeView: FileView {
-        id: themeView
-
-        path: root.expand(root.themeFile)
-        watchChanges: true
-        printErrors: false
-        onFileChanged: reload()
-        onLoaded: {
-            const t = Theme.parse(text(), root.themeMode);
-            if (t.error) {
-                console.warn(`orbit: ${root.themeFile}: ${t.error}`);
-                return;
-            }
-            root._theme = t;
-        }
-        onLoadFailed: root._theme = {}
-        onPathChanged: if (!path) root._theme = {}
-    }
 
     Component.onCompleted: {
         const d = {};
@@ -259,10 +281,6 @@ QtObject {
         }
         _defaults = d;
         rollPlanet();
-        // The file may have finished loading before the snapshot existed
-        if (!source)
-            apply("");
-        else if (_fileReady)
-            apply(file.text());
+        reload();
     }
 }

@@ -33,6 +33,7 @@ ShellRoot {
             id: view
 
             config: OrbitConfig {
+                backend: QuickshellBackend {}
                 primary: myPalette.primary
                 surfaceContainer: myPalette.surfaceContainer
                 textColour: myPalette.onSurface

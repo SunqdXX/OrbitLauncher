@@ -1,8 +1,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
-import Quickshell
-import Quickshell.Widgets
+import QtQuick.Effects
 
 // The orbit: a textured planet with app icons spread over a sphere around it
 // (or flat rings for saturn). Drag to spin; while searching it turns the
@@ -22,6 +21,8 @@ Item {
     readonly property real cx: width / 2
     readonly property real cy: height / 2
     readonly property bool rings: config.resolvedOrbitStyle === "rings"
+    // The software renderer (renderer = software, VMs, no GPU) has no shaders
+    readonly property bool softwareRender: GraphicsInfo.api === GraphicsInfo.Software
 
     property real yaw: 0
     property real pitch: config.restPitch
@@ -33,7 +34,6 @@ Item {
 
     // The first population snaps into place instead of gliding in from one slot
     property bool _settled: false
-    Component.onCompleted: Qt.callLater(() => _settled = true)
 
     // Animated so icons glide when the orbit population changes
     property real fCount: Math.max(1, apps.length)
@@ -187,16 +187,24 @@ Item {
         width: root.orbitR * 2
         height: root.orbitR * 2
 
-        ClippingRectangle {
+        // The texture, masked to a circle (plain QtQuick, so it runs anywhere)
+        Item {
+            id: planetTexture
+
             anchors.fill: parent
-            radius: width / 2
-            color: root.config.planetBackground
+            visible: false
+            layer.enabled: !root.softwareRender
+
+            Rectangle {
+                anchors.fill: parent
+                color: root.config.planetBackground
+            }
 
             Image {
                 id: planetImg
 
                 // Try the name as given, then each common extension
-                readonly property string base: `${root.config.resolvedPlanetsDir}/${root.config.resolvedPlanet}`
+                readonly property string base: `${root.config.resolvedPlanetsUrl}/${root.config.resolvedPlanet}`
                 readonly property list<string> candidates: /\.[a-z0-9]{2,5}$/i.test(root.config.resolvedPlanet) ? [base] : ["jpg", "png", "jpeg", "webp", "svg"].map(e => `${base}.${e}`)
                 property int attempt: 0
 
@@ -206,18 +214,70 @@ Item {
                         if (attempt + 1 < candidates.length)
                             attempt++;
                         else
-                            console.warn(`orbit: no planet image "${root.config.resolvedPlanet}" in ${root.config.resolvedPlanetsDir}`);
+                            console.warn(`orbit: no planet image "${root.config.resolvedPlanet}" in ${root.config.resolvedPlanetsUrl}`);
                     }
                 }
 
                 anchors.fill: parent
-                source: candidates.length ? "file://" + candidates[attempt] : ""
+                source: candidates.length ? candidates[attempt] : Qt.url("")
                 sourceSize: Qt.size(Math.min(root.config.planetResolution, Math.ceil(width * 1.1)), Math.min(root.config.planetResolution, Math.ceil(height * 1.1)))
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true
                 cache: false
                 scale: 1.02
                 rotation: -root.yaw * root.config.planetSpin
+            }
+        }
+
+        Rectangle {
+            id: planetMask
+
+            anchors.fill: parent
+            radius: width / 2
+            antialiasing: true
+            visible: false
+            layer.enabled: !root.softwareRender
+        }
+
+        MultiEffect {
+            anchors.fill: parent
+            visible: !root.softwareRender
+            source: planetTexture
+            maskEnabled: true
+            maskSource: planetMask
+            maskThresholdMin: 0.5
+            maskSpreadAtMin: 1
+        }
+
+        // Software fallback: the same circle-clipped texture, drawn by the CPU
+        Canvas {
+            anchors.fill: parent
+            visible: root.softwareRender
+            readonly property string src: root.softwareRender && planetImg.status === Image.Ready ? planetImg.source.toString() : ""
+            readonly property real angle: planetImg.rotation * Math.PI / 180
+
+            onSrcChanged: if (src) loadImage(src)
+            onImageLoaded: requestPaint()
+            onAngleChanged: if (src) requestPaint()
+            onWidthChanged: requestPaint()
+            onPaint: {
+                const ctx = getContext("2d");
+                const r = width / 2;
+                ctx.reset();
+                ctx.beginPath();
+                ctx.arc(r, r, r, 0, 2 * Math.PI);
+                ctx.closePath();
+                ctx.clip();
+                ctx.fillStyle = root.config.planetBackground;
+                ctx.fillRect(0, 0, width, height);
+                if (src && isImageLoaded(src)) {
+                    // PreserveAspectCrop, slightly overscanned like the GPU path
+                    const iw = Math.max(1, planetImg.implicitWidth), ih = Math.max(1, planetImg.implicitHeight);
+                    const k = Math.max(width / iw, height / ih) * planetImg.scale;
+                    ctx.translate(r, r);
+                    ctx.rotate(angle);
+                    ctx.drawImage(src, -iw * k / 2, -ih * k / 2, iw * k, ih * k);
+                }
             }
         }
 
@@ -242,16 +302,55 @@ Item {
         }
     }
 
-    Repeater {
-        model: ScriptModel {
-            values: root.apps
+    // A keyed model: when results reorder, existing tiles move to their new
+    // slot (and glide there) instead of every delegate being rebuilt
+    ListModel {
+        id: slots
+    }
+
+    property var entryById: ({})
+
+    onAppsChanged: syncSlots()
+    Component.onCompleted: {
+        syncSlots();
+        Qt.callLater(() => _settled = true);
+    }
+
+    function syncSlots(): void {
+        const map = {};
+        for (const a of apps)
+            map[a.id] = a;
+        entryById = map;
+        const ids = apps.map(a => a.id);
+        for (let i = 0; i < ids.length; i++) {
+            if (i < slots.count && slots.get(i).appId === ids[i])
+                continue;
+            let from = -1;
+            for (let k = i + 1; k < slots.count; k++)
+                if (slots.get(k).appId === ids[i]) {
+                    from = k;
+                    break;
+                }
+            if (from >= 0)
+                slots.move(from, i, 1);
+            else
+                slots.insert(i, {
+                    appId: ids[i]
+                });
         }
+        if (slots.count > ids.length)
+            slots.remove(ids.length, slots.count - ids.length);
+    }
+
+    Repeater {
+        model: slots
 
         Item {
             id: app
 
-            required property DesktopEntry modelData
+            required property string appId
             required property int index
+            readonly property var modelData: root.entryById[appId]
 
             property real slot: index
 
@@ -294,11 +393,15 @@ Item {
                 border.width: app.highlighted ? 2 : 0
                 border.color: root.config.cPrimary
 
-                IconImage {
+                Image {
                     anchors.centerIn: parent
-                    implicitSize: Math.round(parent.width * root.config.iconScale)
-                    source: Quickshell.iconPath(app.modelData?.icon, "image-missing")
-                    asynchronous: true
+                    width: Math.round(parent.width * root.config.iconScale)
+                    height: width
+                    sourceSize: Qt.size(width, height)
+                    source: app.modelData ? root.config.backend.iconUrl(app.modelData.icon ?? "") : ""
+                    fillMode: Image.PreserveAspectFit
+                    asynchronous: root.config.backend?.kind === "quickshell"
+                    smooth: true
                 }
             }
 

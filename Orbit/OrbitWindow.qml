@@ -5,16 +5,17 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Hyprland
+import "internal/hypr.js" as Hypr
 
-// Orbit as a self-contained layer-shell popup. Drop one into any quickshell
-// config and toggle it with `qs ipc call orbit toggle` or a Hyprland bind to
+// Orbit inside a quickshell config: a layer-shell popup you drop into your own
+// ShellRoot. Toggle it with `qs ipc call orbit toggle` or a Hyprland bind to
 // `global, quickshell:orbit`. The window and everything in it is destroyed
-// while closed, so an idle Orbit costs next to nothing.
+// while closed. (The standalone `orbit` binary does not use this file.)
 PanelWindow {
     id: root
 
     property OrbitConfig config: OrbitConfig {}
-    property bool open: false
+    property alias open: popup.open
 
     // Set either to "" to disable it (e.g. when your shell routes its own keybinds)
     property string ipcTarget: "orbit"
@@ -34,45 +35,12 @@ PanelWindow {
     }
 
     readonly property bool onHyprland: !!Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE")
-    readonly property bool backdrop: config.backdropOpacity > 0
 
-    property real offsetScale: open ? 0 : 1
-
-    Behavior on offsetScale {
-        NumberAnimation {
-            duration: root.config.anim("defaultSpatial").duration
-            easing.type: Easing.BezierSpline
-            easing.bezierCurve: root.config.anim("defaultSpatial").curve
-        }
+    QuickshellBackend {
+        id: qsBackend
     }
 
-    property bool _shown: false
-    onOffsetScaleChanged: if (offsetScale >= 1 && !open) finishClose()
-
-    function finishClose(): void {
-        closeFallback.stop();
-        if (!_shown)
-            return;
-        _shown = false;
-        dismissed();
-        // The view is unloaded with the window; hand its JS garbage back now
-        Qt.callLater(gc);
-    }
-
-    // Animations only advance while the compositor draws us. Closed while hidden
-    // (under a fullscreen game, on a sleeping output) the fade would never end,
-    // so finish the close on a timer as well.
-    Timer {
-        id: closeFallback
-
-        interval: root.config.anim("defaultSpatial").duration + 250
-        onTriggered: if (!root.open) {
-            root._forceHidden = true;
-            root.finishClose();
-        }
-    }
-
-    property bool _forceHidden: false
+    Component.onCompleted: if (!config.backend) config.backend = qsBackend
 
     // Pick the output when opening, so the launcher never jumps between screens
     function pickScreen(): var {
@@ -91,24 +59,18 @@ PanelWindow {
         return screens[0] ?? null;
     }
 
-    onOpenChanged: {
-        if (open) {
-            _shown = true;
-            _forceHidden = false;
-            screen = pickScreen();
-            applyBlur(); // cheap, and survives a `hyprctl reload` wiping runtime rules
-            if (config.planet.trim().toLowerCase() === "random")
-                config.rollPlanet();
-            if (content.item)
-                content.item.focusSearch();
-        } else {
-            closeFallback.restart();
-            if (content.item)
-                content.item.reset();
+    Connections {
+        target: popup
+
+        function onOpenChanged(): void {
+            if (popup.open) {
+                root.screen = root.pickScreen();
+                root.applyBlur(); // cheap, and survives a `hyprctl reload` wiping runtime rules
+            }
         }
     }
 
-    visible: open || (offsetScale < 1 && !_forceHidden)
+    visible: popup.wantsVisible
     color: "transparent"
 
     WlrLayershell.namespace: config.namespace
@@ -119,37 +81,17 @@ PanelWindow {
     // Without a backdrop the surface is only as big as the launcher, centred on
     // the output; with one it covers the output so it can dim and catch clicks
     anchors.top: true
-    anchors.bottom: backdrop
-    anchors.left: backdrop
-    anchors.right: backdrop
-    margins.top: backdrop ? 0 : Math.max(0, Math.round(((screen?.height ?? 1080) - implicitHeight) / 2 + config.verticalOffset))
+    anchors.bottom: popup.backdrop
+    anchors.left: popup.backdrop
+    anchors.right: popup.backdrop
+    margins.top: popup.backdrop ? 0 : Math.max(0, Math.round(((screen?.height ?? 1080) - implicitHeight) / 2 + config.verticalOffset))
 
-    implicitWidth: content.item ? content.item.implicitWidth : 804
-    implicitHeight: content.item ? content.item.implicitHeight : 870
+    implicitWidth: popup.contentWidth
+    implicitHeight: popup.contentHeight
 
-    // Same treatment caelestia gives its drawers: a runtime layerrule (never
-    // written to hyprland.conf). Tries the 0.53+ syntax, then the legacy one.
     function applyBlur(): void {
-        if (!onHyprland)
-            return;
-        const ns = config.namespace.replace(/[^A-Za-z0-9_.-]/g, "");
-        const on = config.blur ? 1 : 0;
-        const a = Math.max(0, Math.min(1, config.blurIgnoreAlpha)).toFixed(2);
-        const legacy = config.blur ? `hyprctl keyword layerrule 'blur, ${ns}' >/dev/null; hyprctl keyword layerrule 'ignorealpha ${a}, ${ns}' >/dev/null` : `hyprctl keyword layerrule 'unset, ${ns}' >/dev/null`;
-        Quickshell.execDetached(["sh", "-c", `hyprctl keyword layerrule 'blur ${on}, match:namespace ${ns}' | grep -q '^ok' && hyprctl keyword layerrule 'ignore_alpha ${a}, match:namespace ${ns}' >/dev/null || { ${legacy}; }`]);
-    }
-
-    Connections {
-        target: root.config
-        function onBlurChanged(): void {
-            root.applyBlur();
-        }
-        function onBlurIgnoreAlphaChanged(): void {
-            root.applyBlur();
-        }
-        function onNamespaceChanged(): void {
-            root.applyBlur();
-        }
+        if (onHyprland)
+            Quickshell.execDetached(["sh", "-c", Hypr.blurCommand(config.namespace, config.blur, config.blurIgnoreAlpha)]);
     }
 
     HyprlandFocusGrab {
@@ -158,35 +100,14 @@ PanelWindow {
         onCleared: root.open = false
     }
 
-    Rectangle {
+    OrbitPopup {
+        id: popup
+
         anchors.fill: parent
-        visible: root.backdrop
-        color: root.config.backdropColour
-        opacity: root.config.backdropOpacity * (1 - root.offsetScale)
-
-        MouseArea {
-            anchors.fill: parent
-            onClicked: root.open = false
-        }
-    }
-
-    Loader {
-        id: content
-
-        anchors.centerIn: parent
-        anchors.verticalCenterOffset: root.backdrop ? root.config.verticalOffset : 0
-        active: root.visible
-
-        opacity: 1 - root.offsetScale
-        scale: 1 - root.offsetScale * 0.13
-
-        sourceComponent: OrbitView {
-            config: root.config
-            maxHeight: (root.screen?.height ?? 1440) + 10
-            onRequestClose: root.open = false
-            onLaunched: entry => root.launched(entry)
-            Component.onCompleted: focusSearch()
-        }
+        config: root.config
+        maxHeight: (root.screen?.height ?? 1440) + 10
+        onLaunched: entry => root.launched(entry)
+        onDismissed: root.dismissed()
     }
 
     IpcHandler {

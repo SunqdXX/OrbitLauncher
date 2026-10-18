@@ -1,0 +1,29 @@
+# Maintainer: SunqdXX
+pkgname=orbit-launcher-git
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="A planet app launcher for Wayland and X11, standalone like wofi"
+arch=('x86_64' 'aarch64')
+url="https://github.com/SunqdXX/OrbitLauncher"
+license=('GPL-3.0-only')
+depends=('qt6-base' 'qt6-declarative' 'qt6-svg' 'qt6-wayland' 'layer-shell-qt')
+makedepends=('cmake' 'git')
+provides=('orbit-launcher')
+conflicts=('orbit-launcher')
+source=("git+https://github.com/SunqdXX/OrbitLauncher.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd OrbitLauncher
+    printf '0.2.0.r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+    cmake -S OrbitLauncher -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+    cmake --build build
+}
+
+package() {
+    DESTDIR="$pkgdir" cmake --install build
+    install -Dm644 OrbitLauncher/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
